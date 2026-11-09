@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db*
+*.jsonl*
+*.zip
+*.pem
+*.p12
+*.pfx
+*.key
+.env
+.env.*
+auth.json
+credentials.json
+snapshots/
+objects/
+vault/

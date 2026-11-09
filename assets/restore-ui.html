@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Session 恢复路径规划</title>
+  <style>
+    :root{color-scheme:light;--ink:#1d2433;--muted:#667085;--line:#d8deea;--panel:#fff;--bg:#f4f6fa;--accent:#3157c8;--accent-soft:#edf2ff;--good:#18794e;--bad:#b42318}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    header{padding:24px max(24px,calc((100vw - 1440px)/2));background:#fff;border-bottom:1px solid var(--line)}h1{font-size:23px;margin:0 0 5px}header p{margin:0;color:var(--muted)}
+    main{max-width:1440px;margin:22px auto;padding:0 24px}.toolbar{position:sticky;top:0;z-index:2;background:#f4f6fa;padding:12px 0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) minmax(220px,1fr) auto auto;gap:10px;align-items:end}
+    label{display:grid;gap:4px;color:#475467;font-size:12px}input,button{font:inherit}input[type=text]{width:100%;border:1px solid #c7ceda;border-radius:8px;padding:9px 10px;background:#fff;color:var(--ink)}input:focus{outline:2px solid #9db3ff;border-color:var(--accent)}button{border:1px solid var(--accent);border-radius:8px;padding:9px 12px;background:#fff;color:var(--accent);font-weight:600;cursor:pointer}button.primary{background:var(--accent);color:#fff}button:hover{filter:brightness(.97)}.input-action{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center}.input-action button{padding:8px 10px;white-space:nowrap}
+    .summary{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:14px 0;color:var(--muted)}.columns,.row{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,.8fr);gap:16px}.columns{padding:8px 14px;color:#475467;font-weight:700}.list{display:grid;gap:9px}.row{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px;align-items:start}.source{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px}.source input{margin-top:5px}.title{font-size:15px;font-weight:700;overflow-wrap:anywhere}.meta{color:var(--muted);font-size:12px;margin-top:4px;overflow-wrap:anywhere}.source-label{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;background:var(--accent-soft);color:#334b99;font-size:11px;font-weight:500}.target{display:grid;gap:5px}.target input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.hint{color:var(--muted);font-size:11px}details{margin-top:6px;color:var(--muted);font-size:11px}summary{cursor:pointer;width:max-content}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.status{min-height:20px;margin:10px 0;color:var(--bad)}.status.good{color:var(--good)}.empty{padding:28px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:12px}
+    @media(max-width:850px){.toolbar{position:static;grid-template-columns:1fr 1fr}.columns{display:none}.row{grid-template-columns:1fr}.target{margin-left:32px}.summary{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Session 恢复路径规划</h1>
+    <p>左侧核对原会话名称和来源目录，右侧填写恢复后打开会话时使用的工作目录。内部 ID 收在每条记录的详情里。</p>
+  </header>
+  <main>
+    <section class="toolbar" aria-label="恢复规划工具">
+      <label>搜索会话名称或来源目录<input id="search" type="text" placeholder="例如：收益计算、merchant"></label>
+      <label>统一设置所选项的目标目录<span class="input-action"><input id="bulkPath" type="text" placeholder="/Users/name/projects/merchant"><button id="pickBulk" class="pick-folder" type="button">选择目录</button></span></label>
+      <label>恢复后名称前缀（仅 Codex，可选）<input id="namePrefix" type="text" placeholder="例如：2026临时电脑-"></label>
+      <button id="applyBulk" type="button">应用到所选</button>
+      <button id="selectAll" type="button">全选</button>
+    </section>
+    <div class="summary"><span id="count">已选 0 条</span><button id="download" class="primary" type="button">下载恢复计划</button></div>
+    <div class="columns"><span>原会话</span><span>目标导入路径</span></div>
+    <div id="list" class="list"></div>
+    <p id="status" class="status" role="status"></p>
+    <p class="hint">页面只在本机读取快照中保存的会话标题和路径，不会联网。macOS 交互模式可点击“选择目录”打开系统目录选择框；也可以直接编辑路径。网页负责选择和规划，实际导入由本机恢复器执行。恢复计划包含内部 ID 供脚本精确匹配，但清单中不会把 ID 当作会话名称。</p>
+  </main>
+  <script>
+    const DATA = (() => {
+      try { return JSON.parse(decodeURIComponent("__SESSION_DATA_URI__")); }
+      catch {
+        document.body.insertAdjacentHTML('afterbegin', '<aside style="margin:16px;padding:14px;background:#fff4e5;border:1px solid #f2c078;border-radius:8px;color:#7a4b00"><strong>这是恢复页面模板。</strong>请通过 session-vault 的 <code>restore-ui</code> 命令生成带有快照数据的页面；直接打开模板不会显示会话。</aside>');
+        return {sessions: [], name_prefix: ''};
+      }
+    })();
+    const PICKER_TOKEN = "__SESSION_VAULT_PICKER_TOKEN__";
+    const PICKER_ENABLED = Boolean(PICKER_TOKEN && PICKER_TOKEN !== "__SESSION_VAULT_PICKER_TOKEN__");
+    const list = document.getElementById('list');
+    const search = document.getElementById('search');
+    const bulkPath = document.getElementById('bulkPath');
+    const namePrefix = document.getElementById('namePrefix');
+    const status = document.getElementById('status');
+    const sourceLabels = {name:'原会话名称', title:'原会话标题', preview:'原会话预览', first_user_message:'首条用户消息', id:'没有可读标题'};
+    if (DATA.name_prefix) namePrefix.value = DATA.name_prefix;
+
+    function element(tag, cls, text) {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    async function chooseFolder(input) {
+      if (!PICKER_ENABLED) return;
+      status.textContent = '正在打开 macOS 目录选择框…';
+      status.className = 'status';
+      try {
+        const response = await fetch('/choose-folder?token=' + encodeURIComponent(PICKER_TOKEN), {
+          method: 'POST', headers: {'X-Session-Vault-Token': PICKER_TOKEN}
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '目录选择失败');
+        input.value = result.path;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        status.textContent = '已选择目录：' + result.path;
+        status.className = 'status good';
+      } catch (error) {
+        status.textContent = error.message || '目录选择失败';
+        status.className = 'status';
+      }
+    }
+    function render() {
+      list.replaceChildren();
+      const needle = search.value.trim().toLocaleLowerCase();
+      for (const session of DATA.sessions) {
+        const haystack = [session.title, session.source_cwd, session.provider, session.group].join(' ').toLocaleLowerCase();
+        const row = element('article', 'row');
+        row.dataset.sessionId = session.id;
+        row.hidden = Boolean(needle && !haystack.includes(needle));
+
+        const source = element('div', 'source');
+        const check = element('input');
+        check.type = 'checkbox';
+        check.checked = true;
+        check.setAttribute('aria-label', '选择 ' + session.title);
+        check.addEventListener('change', updateCount);
+        const sourceBody = element('div');
+        const title = element('div', 'title', session.title || '(无标题)');
+        const badge = element('span', 'source-label', sourceLabels[session.title_source] || '存档标题');
+        title.append(badge);
+        sourceBody.append(title);
+        sourceBody.append(element('div', 'meta', (session.provider || 'unknown') + ' · 来源目录：' + (session.source_cwd || '(无工作目录)')));
+        if (session.group) sourceBody.append(element('div', 'meta', '原分组：' + session.group));
+        const details = element('details');
+        details.append(element('summary', '', '查看内部 ID'));
+        details.append(element('code', '', session.id));
+        sourceBody.append(details);
+        source.append(check, sourceBody);
+
+        const target = element('div', 'target');
+        const input = element('input');
+        input.type = 'text';
+        input.value = session.target_cwd || '';
+        input.dataset.sessionId = session.id;
+        input.setAttribute('aria-label', '为 ' + session.title + ' 设置目标目录');
+        input.addEventListener('input', updateCount);
+        const actions = element('div', 'input-action');
+        const pick = element('button', 'pick-folder', '选择目录');
+        pick.type = 'button';
+        pick.setAttribute('aria-label', '选择 ' + session.title + ' 的目标目录');
+        pick.addEventListener('click', () => chooseFolder(input));
+        actions.append(input, pick);
+        target.append(actions, element('div', 'hint', session.provider === 'codebuddy-cn' && !session.source_cwd ? 'CodeBuddy CN 导入包的保存目录' : '恢复后会话的工作目录'));
+        row.append(source, target);
+        list.append(row);
+      }
+      updateCount();
+    }
+    function selectedRows() {
+      return [...list.querySelectorAll('.row')].filter(row => row.querySelector('input[type=checkbox]').checked);
+    }
+    function visibleSelectedRows() {
+      return selectedRows().filter(row => !row.hidden);
+    }
+    function isAbsolutePath(value) {
+      return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+    }
+    function updateCount() {
+      const selected = selectedRows();
+      document.getElementById('count').textContent = `已选 ${selected.length} / ${DATA.sessions.length} 条`;
+    }
+    search.addEventListener('input', render);
+    document.getElementById('pickBulk').addEventListener('click', () => chooseFolder(bulkPath));
+    document.getElementById('selectAll').addEventListener('click', () => {
+      const rows = [...list.querySelectorAll('.row:not([hidden])')];
+      const shouldSelect = rows.some(row => !row.querySelector('input[type=checkbox]').checked);
+      for (const row of rows) row.querySelector('input[type=checkbox]').checked = shouldSelect;
+      updateCount();
+      document.getElementById('selectAll').textContent = shouldSelect ? '清空所选' : '全选';
+    });
+    document.getElementById('applyBulk').addEventListener('click', () => {
+      const value = bulkPath.value.trim();
+      if (!isAbsolutePath(value)) { status.textContent = '请输入绝对目标目录，例如 /Users/name/project 或 C:\\Users\\name\\project'; status.className = 'status'; return; }
+      for (const row of visibleSelectedRows()) row.querySelector('.target input').value = value;
+      status.textContent = `已为 ${visibleSelectedRows().length} 条当前可见且已选择的会话设置目标目录。`;
+      status.className = 'status good';
+      updateCount();
+    });
+    document.getElementById('download').addEventListener('click', () => {
+      status.textContent = '';
+      const chosen = selectedRows();
+      if (!chosen.length) { status.textContent = '请至少选择一条 session。'; return; }
+      const sessions = chosen.map(row => {
+        const source = DATA.sessions.find(item => item.id === row.dataset.sessionId);
+        return {...source, target_cwd: row.querySelector('.target input').value.trim()};
+      });
+      if (namePrefix.value && sessions.some(s => s.provider !== 'codex')) { status.textContent = '名称前缀目前用于 Codex 会话；请清空前缀或取消选择其他 provider。'; return; }
+      const invalid = sessions.find(s => s.source_cwd && (!s.target_cwd || !isAbsolutePath(s.target_cwd)));
+      if (invalid) { status.textContent = `请为“${invalid.title}”填写绝对目标目录。`; return; }
+      const plan = {
+        version: 1,
+        vault: DATA.vault,
+        snapshot: DATA.snapshot,
+        snapshot_rel: DATA.snapshot_rel,
+        manifest_sha256: DATA.manifest_sha256,
+        name_prefix: namePrefix.value,
+        sessions: sessions.map(s => ({id:s.id, provider:s.provider, title:s.title, title_source:s.title_source, source_cwd:s.source_cwd, target_cwd:s.target_cwd}))
+      };
+      const blob = new Blob([JSON.stringify(plan, null, 2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'session-vault-restore-plan.json';
+      anchor.click();
+      URL.revokeObjectURL(url);
+      status.textContent = '恢复计划已下载。先用脚本预览；确认目标目录后再执行导入。';
+      status.className = 'status good';
+    });
+    if (!PICKER_ENABLED) document.querySelectorAll('.pick-folder').forEach(button => button.hidden = true);
+    render();
+  </script>
+</body>
+</html>
