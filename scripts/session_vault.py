@@ -280,6 +280,17 @@ def verify_snapshot(root,folder):
   except Exception as e:errors.append(label+': '+str(e))
  sessions=manifest.get('sessions')
  if not isinstance(sessions,list):errors.append('manifest sessions must be a list');sessions=[]
+ source_homes={s.get('provider'):Path(s['home']).expanduser() for s in manifest.get('sources',[]) if isinstance(s,dict) and isinstance(s.get('provider'),str) and isinstance(s.get('home'),str)}
+ def source_status(provider,relative,expected_hash):
+  home=source_homes.get(provider)
+  if home is None:return 'source=unavailable'
+  path=home/relative
+  try:
+   before=path.stat();current=path.read_bytes();after=path.stat()
+   stable_now=(before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+   current_hash=sha(current)
+   return 'source_path='+str(path)+' source_bytes='+str(len(current))+' source_mtime_ns='+str(after.st_mtime_ns)+' source_ctime_ns='+str(after.st_ctime_ns)+' source_sha256='+current_hash+' source_matches_object='+str(current_hash==expected_hash)+' source_stable_during_diagnostic='+str(stable_now)
+  except OSError as e:return 'source_error='+type(e).__name__+':'+str(e)
  for s in sessions:
   if not isinstance(s,dict):errors.append('invalid session entry');continue
   label=str(s.get('provider','?'))+'/'+str(s.get('title') or s.get('id') or '?')
@@ -294,8 +305,14 @@ def verify_snapshot(root,folder):
     try:
      data=get(root,h).decode('utf-8')
      for n,line in enumerate(data.splitlines(),1):
-      if line.strip():json.loads(line)
-    except Exception as e:errors.append(label+': invalid JSONL: '+str(e))
+      if not line.strip():continue
+      try:json.loads(line)
+      except Exception as e:
+       column=getattr(e,'colno',None)
+       source=source_status(s.get('provider'),f.get('path',''),h)
+       errors.append(label+': invalid JSONL object_sha256='+str(h)+' line='+str(n)+' column='+str(column or '?')+' line_bytes='+str(len(line.encode('utf-8')))+' error='+type(e).__name__+': '+str(e)+'; '+source)
+       break
+    except Exception as e:errors.append(label+': invalid JSONL object_sha256='+str(h)+' read_error='+type(e).__name__+': '+str(e))
    if s.get('provider')=='codebuddy-cn' and str(f.get('path','')).lower().endswith('.json'):
     try:validate_codebuddy_cn_archive(get(root,h),label)
     except Exception as e:errors.append(label+': invalid CodeBuddy CN archive: '+str(e))
@@ -473,7 +490,9 @@ def backup_locked(a):
   items.append(dict(provider=provider,id=sid,title=title or sid,title_source=title_source,cwd=cwd or '',group=group,parent=parent,files=files,record=record))
  def file_data(p,home,data):return dict(path=p.resolve().relative_to(home).as_posix(),hash=put(root,data))
  def file(p,home):return file_data(p,home,stable(p))
+ selected=set(a.provider or ['codex','claude','hermes','pi','codebuddy','codebuddy-cn','zcode','agents'])
  for provider,home in [('codex',a.codex_home),('claude',a.claude_home),('hermes',a.hermes_home),('pi',a.pi_home),('codebuddy',a.codebuddy_home),('zcode',a.zcode_home)]:
+  if provider not in selected:continue
   home=Path(home).expanduser().resolve()
   if not home.exists():sources.append(dict(provider=provider,home=str(home),present=False));continue
   source=dict(provider=provider,home=str(home),present=True)
@@ -566,7 +585,7 @@ def backup_locked(a):
     if sensitive_content(b):profile_exclusions.append(dict(root_key=provider,path=rel,reason='credential-like value'));continue
     profile_files.append(dict(provider=provider,root_key=provider,path=rel,hash=put(root,b)))
    except Exception as e:profile_exclusions.append(dict(root_key=provider,path=rel,reason='unreadable: '+str(e)));warnings.append('profile file unreadable: '+provider+'/'+rel)
- export_value=getattr(a,'codebuddy_cn_exports',None)
+ export_value=getattr(a,'codebuddy_cn_exports',None) if 'codebuddy-cn' in selected else None
  if export_value:
   export_root=Path(export_value).expanduser().resolve()
   if not export_root.is_dir():
@@ -603,7 +622,7 @@ def backup_locked(a):
  # Shared Agent Skills are used by Codex and other Agent Skills-compatible tools.
  agents_home_value=getattr(a,'agents_home',None)
  agents_home=Path(agents_home_value).expanduser().resolve() if agents_home_value else None
- if agents_home and agents_home.exists():
+ if 'agents' in selected and agents_home and agents_home.exists():
   sources.append(dict(provider='agents',home=str(agents_home),present=True))
   for p in collect_profile_files('agents',agents_home):
    rel=p.relative_to(agents_home).as_posix()
@@ -1016,6 +1035,7 @@ def main():
   for n,env,default in [('codex','CODEX_HOME','~/.codex'),('claude','CLAUDE_CONFIG_DIR','~/.claude'),('hermes','HERMES_HOME','~/.hermes'),('pi','PI_CODING_AGENT_DIR','~/.pi/agent'),('codebuddy','CODEBUDDY_CONFIG_DIR','~/.codebuddy'),('zcode','ZCODE_HOME','~/.zcode')]:q.add_argument('--'+n+'-home',default=os.environ.get(env,default))
   q.add_argument('--agents-home',default=os.environ.get('AGENTS_HOME','~/.agents'))
   if cmd=='backup':
+   q.add_argument('--provider',action='append',choices=['codex','claude','hermes','pi','codebuddy','codebuddy-cn','zcode','agents'],help='agent(s) to include; repeat for multiple providers (omitting this option keeps legacy all-agent behavior)')
    q.add_argument('--codebuddy-cn-exports',default=os.environ.get('CODEBUDDY_CN_EXPORTS'),help='folder containing CodeBuddy CN JSON/ZIP conversation exports')
    q.add_argument('--host',default=__import__('socket').gethostname());q.add_argument('--include',action='append',default=[]);q.add_argument('--log-file')
   else:
