@@ -34,7 +34,14 @@ python3 scripts/session_vault.py backup --vault '/path/to/session-backups' \
 python3 scripts/session_vault.py verify --vault '/path/to/session-backups' \
   --snapshot latest --host macbook --ack
 
-# Install a recurring background task. Frequency defaults to 15 minutes.
+# Install a recurring background task. Ask whether to enable failure-only system notifications; successful backups stay silent.
+python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups' --provider codex --notify-failure
+# Or use selected weekday local times instead of an interval.
+python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups' \
+  --provider codex --times '11:20,17:00' --notify-failure
+# Explicitly decline failure notifications.
+python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups' --provider codex --no-notify-failure
+# If no time is specified, frequency defaults to 15 minutes.
 python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups'
 python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups' --minutes 30
 python3 scripts/session_vault.py schedule install --vault '/path/to/session-backups' \
@@ -81,7 +88,7 @@ python3 scripts/session_vault.py backup --vault '/path/to/session-backups' \
 
 This skill does not provide cloud backup or sync. It only writes to the folder you specify; use Nutstore, iCloud, Huawei Cloud, Tencent Weiyun or another sync tool yourself to copy that folder. Keep the archive private: conversation transcripts can contain credentials, source code and tool output. The configured memory, rules, skills and non-sensitive settings are backed up; credential files and profile files with detected credential-like values are excluded. Credentials already present inside conversation text remain part of the native transcript. CodeBuddy CN IDE's scheduled snapshots only include exports already saved in the configured export folder; the IDE does not expose a supported background export command. Its settings and login state are not copied.
 
-For recurring backups, recommend installing a background task after the first successful manual backup. If the user requests a recurring task but gives no frequency, use 15 minutes. `schedule install` uses a per-user macOS LaunchAgent or Windows Task Scheduler task, avoids overlapping runs, writes logs into the archive, and can be checked or removed with the commands above. Do not install it merely because a one-off backup was requested. The archive itself still needs the user's cloud sync client.
+For recurring backups, recommend installing a background task after the first successful manual backup. If the user requests a recurring task but gives no frequency or times, use 15 minutes. When creating a task, explicitly ask whether to enable failure-only native notifications; never notify for successful backups. Pass `--notify-failure` for yes and `--no-notify-failure` for no. In an interactive CLI, the installer asks if neither flag is supplied. On macOS, a selected notification is shown through Notification Center; on Windows it uses a native toast. `--times 'HH:MM,HH:MM'` schedules those local times on weekdays. The scheduler uses a per-user macOS LaunchAgent or Windows Task Scheduler task, avoids overlapping runs, writes logs into the archive, and can be checked or removed with the commands above. Do not install it merely because a one-off backup was requested. The archive itself still needs the user's cloud sync client.
 
 The public cloud-client documentation reviewed here describes sync status in each vendor's UI, but does not provide a common supported API for this skill to query whether every file in an arbitrary folder has synced. The receiving computer can run `verify --ack` only after hashes, JSONL, and native SQLite snapshots pass. That receipt syncs back with the archive; the next source backup may then remove older snapshots and unreferenced objects while retaining the verified current head. Without a receipt, old snapshots remain. This is an archive-to-archive proof, not a cloud-vendor status check.
 

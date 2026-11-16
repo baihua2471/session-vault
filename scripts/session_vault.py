@@ -1010,8 +1010,25 @@ def schedule_command(a):
  if operation!='install':raise ValueError('Unknown schedule operation')
  if not a.vault:raise ValueError('schedule install requires --vault')
  if a.minutes<1 or a.minutes>1440:raise ValueError('--minutes must be between 1 and 1440')
+ times=[]
+ if a.times:
+  for value in a.times.split(','):
+   try:hour,minute=(int(part) for part in value.strip().split(':',1))
+   except Exception:raise ValueError('--times must be comma-separated HH:MM values')
+   if hour<0 or hour>23 or minute<0 or minute>59:raise ValueError('Invalid time in --times: '+value)
+   if (hour,minute) in times:raise ValueError('Duplicate time in --times: '+value)
+   times.append((hour,minute))
+  if not times:raise ValueError('--times requires at least one time')
+ notify=getattr(a,'notify_failure',None)
+ if notify is None and sys.stdin.isatty():
+  answer=input('Enable a local notification when backup fails? [y/N] ').strip().lower()
+  notify=answer in {'y','yes'}
+ if notify is None:notify=False
  script=str(Path(__file__).resolve());root=Path(a.vault).expanduser().resolve();root.mkdir(parents=True,exist_ok=True)
  args=[sys.executable,script,'backup','--vault',str(root),'--host',host]
+ if notify:args.append('--notify-failure')
+ if a.provider:
+  for provider in a.provider:args += ['--provider',provider]
  for name in ('codex','claude','hermes','pi','codebuddy','zcode'):args += ['--'+name+'-home',str(Path(getattr(a,name+'_home')).expanduser().resolve())]
  if getattr(a,'codebuddy_cn_exports',None):args += ['--codebuddy-cn-exports',str(Path(a.codebuddy_cn_exports).expanduser().resolve())]
  log_dir=root/'logs';log_dir.mkdir(parents=True,exist_ok=True)
@@ -1019,18 +1036,24 @@ def schedule_command(a):
  if sys.platform=='darwin':
   label='local.session-vault.backup';launch_dir=Path.home()/'Library'/'LaunchAgents';launch_dir.mkdir(parents=True,exist_ok=True)
   path=launch_dir/(label+'.plist')
-  payload={'Label':label,'ProgramArguments':args,'StartInterval':a.minutes*60,'RunAtLoad':True,'StandardOutPath':str(log_dir/'scheduled.log'),'StandardErrorPath':str(log_dir/'scheduled-error.log'),'ProcessType':'Background'}
+  payload={'Label':label,'ProgramArguments':args,'RunAtLoad':True,'StandardOutPath':str(log_dir/'scheduled.log'),'StandardErrorPath':str(log_dir/'scheduled-error.log'),'ProcessType':'Background'}
+  if times:payload['StartCalendarInterval']=[{'Weekday':weekday,'Hour':hour,'Minute':minute} for weekday in range(2,7) for hour,minute in times]
+  else:payload['StartInterval']=a.minutes*60
   atomic_write(path,plistlib.dumps(payload));subprocess.run(['launchctl','bootout','gui/'+str(os.getuid())+'/'+label],capture_output=True)
   r=subprocess.run(['launchctl','bootstrap','gui/'+str(os.getuid()),str(path)],capture_output=True,text=True)
   if r.returncode:raise ValueError(r.stderr.strip() or 'launchd could not load the backup task')
-  print(dump({'installed':True,'platform':'macOS','interval_minutes':a.minutes,'definition':str(path),'log':str(log_dir/'scheduled.log')}));return
+  print(dump({'installed':True,'platform':'macOS','times':a.times,'interval_minutes':None if times else a.minutes,'notify_on_failure':notify,'providers':a.provider or 'all','definition':str(path),'log':str(log_dir/'scheduled.log')}));return
  if os.name=='nt':
   name='SessionVaultBackup-'+safe_part(host);ns='http://schemas.microsoft.com/windows/2004/02/mit/task';ET.register_namespace('',ns)
   tag=lambda value:'{'+ns+'}'+value
   task=ET.Element(tag('Task'),{'version':'1.2'});ET.SubElement(task,tag('RegistrationInfo'));triggers=ET.SubElement(task,tag('Triggers'))
-  trigger=ET.SubElement(triggers,tag('CalendarTrigger'));repetition=ET.SubElement(trigger,tag('Repetition'));ET.SubElement(repetition,tag('Interval')).text='PT'+str(a.minutes)+'M';ET.SubElement(repetition,tag('Duration')).text='P1D';ET.SubElement(repetition,tag('StopAtDurationEnd')).text='false'
-  ET.SubElement(trigger,tag('StartBoundary')).text=datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S');ET.SubElement(trigger,tag('Enabled')).text='true'
-  schedule=ET.SubElement(trigger,tag('ScheduleByDay'));ET.SubElement(schedule,tag('DaysInterval')).text='1'
+  for hour,minute in (times or [(datetime.datetime.now().hour,datetime.datetime.now().minute)]):
+   trigger=ET.SubElement(triggers,tag('CalendarTrigger'));ET.SubElement(trigger,tag('StartBoundary')).text=datetime.datetime.now().strftime('%Y-%m-%dT')+f'{hour:02d}:{minute:02d}:00';ET.SubElement(trigger,tag('Enabled')).text='true'
+   if times:
+    schedule=ET.SubElement(trigger,tag('ScheduleByWeek'));ET.SubElement(schedule,tag('WeeksInterval')).text='1';ET.SubElement(schedule,tag('DaysOfWeek')).text='62'
+   else:
+    repetition=ET.SubElement(trigger,tag('Repetition'));ET.SubElement(repetition,tag('Interval')).text='PT'+str(a.minutes)+'M';ET.SubElement(repetition,tag('Duration')).text='P1D';ET.SubElement(repetition,tag('StopAtDurationEnd')).text='false'
+    schedule=ET.SubElement(trigger,tag('ScheduleByDay'));ET.SubElement(schedule,tag('DaysInterval')).text='1'
   principals=ET.SubElement(task,tag('Principals'));principal=ET.SubElement(principals,tag('Principal'),{'id':'Author'});ET.SubElement(principal,tag('UserId')).text=subprocess.check_output(['whoami'],text=True).strip();ET.SubElement(principal,tag('LogonType')).text='InteractiveToken';ET.SubElement(principal,tag('RunLevel')).text='LeastPrivilege'
   settings=ET.SubElement(task,tag('Settings'));ET.SubElement(settings,tag('MultipleInstancesPolicy')).text='IgnoreNew';ET.SubElement(settings,tag('DisallowStartIfOnBatteries')).text='false';ET.SubElement(settings,tag('StopIfGoingOnBatteries')).text='false';ET.SubElement(settings,tag('StartWhenAvailable')).text='true';ET.SubElement(settings,tag('Enabled')).text='true';ET.SubElement(settings,tag('ExecutionTimeLimit')).text='PT0S'
   actions=ET.SubElement(task,tag('Actions'),{'Context':'Author'});action=ET.SubElement(actions,tag('Exec'));ET.SubElement(action,tag('Command')).text=sys.executable;ET.SubElement(action,tag('Arguments')).text=subprocess.list2cmdline(args[1:]);ET.SubElement(action,tag('WorkingDirectory')).text=str(Path(script).parent)
@@ -1041,8 +1064,25 @@ def schedule_command(a):
    try:os.unlink(xml_path)
    except OSError:pass
   if r.returncode:raise ValueError(r.stderr.strip() or r.stdout.strip() or 'Task Scheduler could not create the task')
-  print(dump({'installed':True,'platform':'Windows','interval_minutes':a.minutes,'task':name,'command':[sys.executable,*args[1:]]}));return
+  print(dump({'installed':True,'platform':'Windows','times':a.times,'interval_minutes':None if times else a.minutes,'notify_on_failure':notify,'providers':a.provider or 'all','task':name,'command':[sys.executable,*args[1:]]}));return
  raise ValueError('Scheduled backups are supported on macOS and Windows')
+
+def notify_backup_failure(log_file=None):
+ title='Session Vault backup failed'
+ message='The backup failed. Check the scheduled backup log.'
+ if log_file:message+=' Log: '+str(log_file)
+ message=message[:400]
+ if sys.platform=='darwin':
+  esc=lambda value:value.replace('\\','\\\\').replace('"','\\"').replace('\n',' ')
+  script='display notification "'+esc(message)+'" with title "'+esc(title)+'"'
+  return subprocess.run(['osascript','-e',script],capture_output=True).returncode==0
+ if os.name=='nt':
+  xml='<toast><visual><binding template="ToastGeneric"><text>'+html.escape(title)+'</text><text>'+html.escape(message)+'</text></binding></visual></toast>'
+  encoded=base64.b64encode(xml.encode('utf-8')).decode('ascii')
+  command="$xml=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"'));[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] > $null;[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime] > $null;$doc=New-Object Windows.Data.Xml.Dom.XmlDocument;$doc.LoadXml($xml);$toast=[Windows.UI.Notifications.ToastNotification]::new($doc);[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.Windows.PowerShell').Show($toast)"
+  exe=shutil.which('powershell.exe') or shutil.which('powershell')
+  return bool(exe) and subprocess.run([exe,'-NoProfile','-NonInteractive','-Command',command],capture_output=True).returncode==0
+ return False
 
 def main():
  p=argparse.ArgumentParser();sub=p.add_subparsers(dest='cmd',required=True)
@@ -1053,13 +1093,14 @@ def main():
   if cmd=='backup':
    q.add_argument('--provider',action='append',choices=['codex','claude','hermes','pi','codebuddy','codebuddy-cn','zcode','agents'],help='agent(s) to include; repeat for multiple providers (omitting this option keeps legacy all-agent behavior)')
    q.add_argument('--codebuddy-cn-exports',default=os.environ.get('CODEBUDDY_CN_EXPORTS'),help='folder containing CodeBuddy CN JSON/ZIP conversation exports')
-   q.add_argument('--host',default=__import__('socket').gethostname());q.add_argument('--include',action='append',default=[]);q.add_argument('--log-file')
+   q.add_argument('--host',default=__import__('socket').gethostname());q.add_argument('--include',action='append',default=[]);q.add_argument('--log-file');q.add_argument('--notify-failure',action='store_true',help='show a native notification if this backup fails')
   else:
    q.add_argument('--codebuddy-cn-home',default=os.environ.get('CODEBUDDY_CN_HOME',str(Path.home()/'Documents'/'CodeBuddy CN Imports')),help='destination folder for CodeBuddy CN import bundles')
    q.add_argument('--snapshot');q.add_argument('--host');q.add_argument('--plan');q.add_argument('--map',action='append',default=[]);q.add_argument('--session',action='append',default=[]);q.add_argument('--project');q.add_argument('--provider',choices=['codex','claude','hermes','pi','codebuddy','codebuddy-cn']);q.add_argument('--restore-extras',action='store_true');q.add_argument('--restore-profile',action='store_true',help='restore archived memories, rules, skills and non-sensitive settings');q.add_argument('--name-prefix');q.add_argument('--apply',action='store_true');q.add_argument('--agents-stopped',action='store_true')
  q=sub.add_parser('verify');q.add_argument('--vault',required=True);q.add_argument('--snapshot',required=True);q.add_argument('--host');q.add_argument('--ack',action='store_true',help='write a peer-verification receipt for cloud sync');q.add_argument('--receiver')
  q=sub.add_parser('latest');q.add_argument('--vault',required=True);q.add_argument('--host')
- q=sub.add_parser('schedule');q.add_argument('operation',choices=['install','status','remove']);q.add_argument('--vault');q.add_argument('--host',default=__import__('socket').gethostname());q.add_argument('--minutes',type=int,default=15);q.add_argument('--codebuddy-cn-exports',default=os.environ.get('CODEBUDDY_CN_EXPORTS'),help='folder containing CodeBuddy CN JSON/ZIP conversation exports')
+ q=sub.add_parser('schedule');q.add_argument('operation',choices=['install','status','remove']);q.add_argument('--vault');q.add_argument('--host',default=__import__('socket').gethostname());q.add_argument('--minutes',type=int,default=15);q.add_argument('--times',help='weekday local times, comma-separated HH:MM values (for example 11:20,17:00)');q.add_argument('--provider',action='append',choices=['codex','claude','hermes','pi','codebuddy','codebuddy-cn','zcode','agents'],help='agent(s) to include; repeat for multiple providers');q.add_argument('--codebuddy-cn-exports',default=os.environ.get('CODEBUDDY_CN_EXPORTS'),help='folder containing CodeBuddy CN JSON/ZIP conversation exports')
+ ng=q.add_mutually_exclusive_group();ng.add_argument('--notify-failure',dest='notify_failure',action='store_true',default=None,help='show a native notification only when a scheduled backup fails');ng.add_argument('--no-notify-failure',dest='notify_failure',action='store_false',help='do not show failure notifications')
  for n,env,default in [('codex','CODEX_HOME','~/.codex'),('claude','CLAUDE_CONFIG_DIR','~/.claude'),('hermes','HERMES_HOME','~/.hermes'),('pi','PI_CODING_AGENT_DIR','~/.pi/agent'),('codebuddy','CODEBUDDY_CONFIG_DIR','~/.codebuddy'),('zcode','ZCODE_HOME','~/.zcode')]:q.add_argument('--'+n+'-home',default=os.environ.get(env,default))
  q.add_argument('--agents-home',default=os.environ.get('AGENTS_HOME','~/.agents'))
  q=sub.add_parser('restore-ui');q.add_argument('--vault',required=True);q.add_argument('--snapshot',required=True,help='snapshot path or latest');q.add_argument('--host');q.add_argument('--output',required=True);q.add_argument('--map',action='append',default=[]);q.add_argument('--name-prefix',default='');q.add_argument('--codebuddy-cn-home',default=os.environ.get('CODEBUDDY_CN_HOME',str(Path.home()/'Documents'/'CodeBuddy CN Imports')),help='default destination folder for CodeBuddy CN import bundles');q.add_argument('--serve',action='store_true',help='(legacy) open the browser planner; now the default');q.add_argument('--no-web',action='store_true',help='write the planner without starting a browser or local server')
@@ -1073,7 +1114,11 @@ def main():
    elif a.cmd=='verify':verify_command(a)
    elif a.cmd=='latest':latest_command(a)
    else:globals()[a.cmd](a)
-  except Exception as e:p.exit(1,'ERROR: '+str(e)+'\n')
+  except Exception as e:
+   if a.cmd=='backup' and getattr(a,'notify_failure',False):
+    notified=notify_backup_failure(getattr(a,'log_file',None))
+    if not notified:print('WARNING: native failure notification could not be displayed',file=sys.stderr)
+   p.exit(1,'ERROR: '+str(e)+'\n')
  log_file=getattr(a,'log_file',None)
  if log_file:
   log_path=Path(log_file).expanduser();log_path.parent.mkdir(parents=True,exist_ok=True)
