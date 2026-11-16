@@ -72,6 +72,17 @@ def stable(p):
  a=p.stat();b=p.read_bytes();z=p.stat()
  if (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)!=(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns):raise ValueError('Session changed during backup; retry when idle: '+str(p))
  return b
+def codex_rollout_bytes(path):
+ path=Path(path)
+ if path.is_file():return path,stable(path)
+ compressed=Path(str(path)+'.zst')
+ if not compressed.is_file():return None,None
+ executable=shutil.which('zstd')
+ if not executable:raise ValueError('compressed Codex rollout found but zstd executable is unavailable: '+str(compressed))
+ raw=stable(compressed)
+ result=subprocess.run([executable,'-q','-d','-c'],input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ if result.returncode:raise ValueError('could not decompress Codex rollout '+str(compressed)+': '+result.stderr.decode('utf-8','replace').strip())
+ return compressed,result.stdout
 
 PROFILE_TREES={
  'codex':['memories','rules','skills','prompts'],
@@ -286,10 +297,13 @@ def verify_snapshot(root,folder):
   if home is None:return 'source=unavailable'
   path=home/relative
   try:
-   before=path.stat();current=path.read_bytes();after=path.stat()
+   if provider=='codex' and not path.is_file() and Path(str(path)+'.zst').is_file():
+    source=Path(str(path)+'.zst');before=source.stat();current=codex_rollout_bytes(path)[1];after=source.stat()
+   else:
+    source=path;before=source.stat();current=source.read_bytes();after=source.stat()
    stable_now=(before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
    current_hash=sha(current)
-   return 'source_path='+str(path)+' source_bytes='+str(len(current))+' source_mtime_ns='+str(after.st_mtime_ns)+' source_ctime_ns='+str(after.st_ctime_ns)+' source_sha256='+current_hash+' source_matches_object='+str(current_hash==expected_hash)+' source_stable_during_diagnostic='+str(stable_now)
+   return 'source_path='+str(source)+' source_bytes='+str(len(current))+' source_mtime_ns='+str(after.st_mtime_ns)+' source_ctime_ns='+str(after.st_ctime_ns)+' source_sha256='+current_hash+' source_matches_object='+str(current_hash==expected_hash)+' source_stable_during_diagnostic='+str(stable_now)
   except OSError as e:return 'source_error='+type(e).__name__+':'+str(e)
  for s in sessions:
   if not isinstance(s,dict):errors.append('invalid session entry');continue
@@ -505,8 +519,10 @@ def backup_locked(a):
     groups={t:rows(c,t) for t in ['projects','thread_sections'] if t in names}
     for r in rows(c,'threads'):
      p=Path(r['rollout_path'])
-     if not p.is_file():warnings.append('codex missing rollout: '+r['id']);continue
-     try:f=file(p,home)
+     try:
+      source_path,data=codex_rollout_bytes(p)
+      if source_path is None:warnings.append('codex missing rollout: '+r['id']);continue
+      f=file_data(p,home,data)
      except ValueError: warnings.append('codex rollout outside home: '+r['id']);continue
      rec=dict(db=dbs[-1].name,tables={'threads':[r],**groups})
      title,title_source=title_for(r,r['id'])
