@@ -5,7 +5,7 @@ description: Back up and restore native local sessions for Codex, Claude Code, H
 
 # Session Vault
 
-Run `python3 scripts/session_vault.py --help` relative to this skill on macOS/Linux; on Windows use `py -3 scripts/session_vault.py --help` (or `python` if it launches Python 3). Python 3.9+; no Python packages are required. To read Codex's compressed `.jsonl.zst` rollout siblings, the `zstd` command-line tool must be available on PATH.
+Run `python3 scripts/session_vault.py --help` relative to this skill on macOS/Linux; on Windows use `py -3 scripts/session_vault.py --help` (or `python` if it launches Python 3). Python 3.9+; no Python packages are required. To read Codex's compressed `.jsonl.zst` rollout siblings, the skill checks `PATH`, `SESSION_VAULT_ZSTD`, and standard macOS Homebrew locations (`/opt/homebrew/bin/zstd`, `/usr/local/bin/zstd`). Background tasks do not inherit the shell's PATH; for a nonstandard install, set `SESSION_VAULT_ZSTD` to the executable's absolute path in the task environment. If zstd cannot be found or decompression fails, the affected sessions are reported and the incomplete snapshot is not promoted.
 
 ## Scope and workflow
 

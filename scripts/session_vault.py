@@ -68,20 +68,45 @@ def get(root,h):
  b=(root/'objects'/h[:2]/h).read_bytes()
  if sha(b)!=h:raise ValueError('Corrupt object '+h)
  return b
+class SessionChangedError(ValueError):
+ warning_category='source changed during backup'
+class ZstdUnavailableError(ValueError):
+ warning_category='zstd unavailable'
+class RolloutDecompressionError(ValueError):
+ warning_category='decompression failed'
+ZSTD_CANDIDATES=('/opt/homebrew/bin/zstd','/usr/local/bin/zstd','/usr/bin/zstd')
+def zstd_executable():
+ candidates=[]
+ configured=os.environ.get('SESSION_VAULT_ZSTD')
+ if configured:candidates.append(configured)
+ located=shutil.which('zstd')
+ if located:candidates.append(located)
+ candidates.extend(ZSTD_CANDIDATES)
+ seen=set()
+ for candidate in candidates:
+  path=Path(candidate).expanduser()
+  key=str(path)
+  if key in seen:continue
+  seen.add(key)
+  try:
+   if path.is_file() and (os.name=='nt' or os.access(path,os.X_OK)):return str(path.resolve())
+  except OSError:continue
+ return None
 def stable(p):
  a=p.stat();b=p.read_bytes();z=p.stat()
- if (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)!=(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns):raise ValueError('Session changed during backup; retry when idle: '+str(p))
+ if (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)!=(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns):raise SessionChangedError('Session changed during backup; retry when idle: '+str(p))
  return b
 def codex_rollout_bytes(path):
  path=Path(path)
  if path.is_file():return path,stable(path)
  compressed=Path(str(path)+'.zst')
  if not compressed.is_file():return None,None
- executable=shutil.which('zstd')
- if not executable:raise ValueError('compressed Codex rollout found but zstd executable is unavailable: '+str(compressed))
+ executable=zstd_executable()
+ if not executable:raise ZstdUnavailableError('compressed Codex rollout found but zstd executable is unavailable: '+str(compressed)+'; install zstd or set SESSION_VAULT_ZSTD to its executable path')
  raw=stable(compressed)
- result=subprocess.run([executable,'-q','-d','-c'],input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
- if result.returncode:raise ValueError('could not decompress Codex rollout '+str(compressed)+': '+result.stderr.decode('utf-8','replace').strip())
+ try:result=subprocess.run([executable,'-q','-d','-c'],input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ except OSError as e:raise RolloutDecompressionError('could not run zstd for Codex rollout '+str(compressed)+': '+str(e)) from e
+ if result.returncode:raise RolloutDecompressionError('could not decompress Codex rollout '+str(compressed)+': '+result.stderr.decode('utf-8','replace').strip())
  return compressed,result.stdout
 
 PROFILE_TREES={
@@ -520,10 +545,14 @@ def backup_locked(a):
     for r in rows(c,'threads'):
      p=Path(r['rollout_path'])
      try:
-      source_path,data=codex_rollout_bytes(p)
-      if source_path is None:warnings.append('codex missing rollout: '+r['id']);continue
-      f=file_data(p,home,data)
-     except ValueError: warnings.append('codex rollout outside home: '+r['id']);continue
+      relative=p.resolve().relative_to(home)
+     except ValueError:
+      warnings.append('codex rollout outside home: '+r['id']);continue
+     try:source_path,data=codex_rollout_bytes(p)
+     except (ZstdUnavailableError,RolloutDecompressionError,SessionChangedError) as e:
+      warnings.append('codex rollout '+e.warning_category+': '+r['id']+': '+str(e));continue
+     if source_path is None:warnings.append('codex missing rollout: '+r['id']);continue
+     f=dict(path=relative.as_posix(),hash=put(root,data))
      rec=dict(db=dbs[-1].name,tables={'threads':[r],**groups})
      title,title_source=title_for(r,r['id'])
      add(provider,r['id'],title,r.get('cwd'),[f],rec,group=r.get('thread_section_id') or r.get('project_id') or '',parent=r.get('attached_thread_parent_id'),title_source=title_source)

@@ -1,12 +1,55 @@
 import importlib.util,tempfile,sqlite3,json,argparse
-import io,zipfile
+import io,zipfile,os
 from pathlib import Path
+from unittest import mock
+from types import SimpleNamespace
 spec=importlib.util.spec_from_file_location('sv',str(Path(__file__).with_name('session_vault.py')));sv=importlib.util.module_from_spec(spec);spec.loader.exec_module(sv)
 
 def codebuddy_cn_archive(sid,name,cwd=''):
  conv={'id':sid,'type':'chat','name':name,'createdAt':'2026-11-01T00:00:00Z','lastMessageAt':'2026-11-01T00:01:00Z','requests':[{'id':'req-'+sid,'type':'chat','state':'complete','messages':[{'id':'user-'+sid,'role':'user','message':'Synthetic first prompt'},{'id':'assistant-'+sid,'role':'assistant','message':'Synthetic response'}]}]}
  if cwd:conv['cwd']=cwd
  return json.dumps({'schema':'codebuddy.conversation','schemaVersion':1,'exportedAt':'2026-11-01T00:02:00Z','data':{'lastMessageAt':conv['lastMessageAt'],'conversations':[conv]}},ensure_ascii=False).encode()
+
+# Codex rollouts can be compressed by Codex and scheduled LaunchAgents do not
+# inherit Homebrew's PATH. Keep the executable lookup and error classification
+# covered without requiring a real zstd binary in the test environment.
+with tempfile.TemporaryDirectory() as tmp:
+ root=Path(tmp);rollout=root/'rollout.jsonl';compressed=Path(str(rollout)+'.zst');compressed.write_bytes(b'compressed fixture')
+ fake_zstd=root/'zstd';fake_zstd.write_text('#!/bin/sh\nexit 0\n');fake_zstd.chmod(0o755)
+ with mock.patch.dict(os.environ,{'SESSION_VAULT_ZSTD':''}),mock.patch.object(sv.shutil,'which',return_value=None),mock.patch.object(sv,'ZSTD_CANDIDATES',(str(fake_zstd),)),mock.patch.object(sv.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'{"fixture":true}\n',stderr=b'')) as run:
+  source,data=sv.codex_rollout_bytes(rollout)
+  assert source==compressed and data==b'{"fixture":true}\n'
+  assert Path(run.call_args.args[0][0]).resolve()==fake_zstd.resolve()
+ with mock.patch.dict(os.environ,{'SESSION_VAULT_ZSTD':''}),mock.patch.object(sv.shutil,'which',return_value=None),mock.patch.object(sv,'ZSTD_CANDIDATES',()):
+  try:sv.codex_rollout_bytes(rollout)
+  except sv.ZstdUnavailableError as e:assert 'zstd executable is unavailable' in str(e)
+  else:raise AssertionError('missing zstd must be reported with a dedicated error')
+ with mock.patch.dict(os.environ,{'SESSION_VAULT_ZSTD':str(fake_zstd)}),mock.patch.object(sv.shutil,'which',return_value=None),mock.patch.object(sv.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout=b'',stderr=b'bad frame')):
+  try:sv.codex_rollout_bytes(rollout)
+  except sv.RolloutDecompressionError as e:assert 'bad frame' in str(e)
+  else:raise AssertionError('invalid compressed rollout must be reported as decompression failure')
+ with mock.patch.object(sv,'zstd_executable',return_value=str(fake_zstd)),mock.patch.object(sv,'stable',side_effect=sv.SessionChangedError('changed while reading')):
+  try:sv.codex_rollout_bytes(rollout)
+  except sv.SessionChangedError as e:assert 'changed while reading' in str(e)
+  else:raise AssertionError('changing source must remain distinguishable')
+
+# An unavailable zstd binary must make the candidate snapshot incomplete, with
+# an accurate warning. A rollout outside the source root has its own warning.
+with tempfile.TemporaryDirectory() as tmp:
+ root=Path(tmp);home=root/'codex';home.mkdir();outside=root/'outside.jsonl';outside.write_text('{}\n')
+ compressed_rollout=home/'sessions/compressed.jsonl';compressed_rollout.parent.mkdir(parents=True);Path(str(compressed_rollout)+'.zst').write_bytes(b'compressed fixture')
+ db=sqlite3.connect(home/'state_5.sqlite');db.execute('create table threads(id text primary key,rollout_path text,cwd text,title text,thread_section_id text)')
+ db.executemany('insert into threads values(?,?,?,?,?)',[('compressed',str(compressed_rollout),'','Compressed title',''),('outside',str(outside),'','Outside title','')]);db.commit();db.close()
+ args=argparse.Namespace(vault=str(root/'vault'),host='fixture',provider=['codex'],include=[],codex_home=str(home),claude_home=str(root/'none-claude'),hermes_home=str(root/'none-hermes'),pi_home=str(root/'none-pi'),codebuddy_home=str(root/'none-codebuddy'),zcode_home=str(root/'none-zcode'),agents_home=None,codebuddy_cn_exports=None)
+ with mock.patch.dict(os.environ,{'SESSION_VAULT_ZSTD':''}),mock.patch.object(sv.shutil,'which',return_value=None),mock.patch.object(sv,'ZSTD_CANDIDATES',()):
+  try:sv.backup(args)
+  except ValueError as e:assert 'previous verified snapshot is unchanged' in str(e)
+  else:raise AssertionError('backup with an unavailable zstd binary must not promote a partial snapshot')
+ snapshot=next((root/'vault/snapshots/fixture').iterdir());manifest=json.loads((snapshot/'manifest.json').read_text());warnings=manifest['warnings']
+ assert any('codex rollout zstd unavailable: compressed:' in warning for warning in warnings),warnings
+ assert any('codex rollout outside home: outside' in warning for warning in warnings),warnings
+ assert not any('codex rollout outside home: compressed' in warning for warning in warnings),warnings
+ assert not sv.head_path(root/'vault','fixture').exists()
 
 with tempfile.TemporaryDirectory() as tmp:
  r=Path(tmp); homes={p:r/p for p in ['codex','claude','hermes','pi','codebuddy','zcode']}
@@ -38,7 +81,7 @@ with tempfile.TemporaryDirectory() as tmp:
  (cb_exports/'batch-export.zip').write_bytes(zbuffer.getvalue())
  for h in homes.values():(h/'auth.json').write_text('NEVER BACK UP')
  extra=r/'artifact.txt';extra.write_text('explicit artifact')
- a=argparse.Namespace(vault=str(r/'vault'),host='fixture',include=[str(extra)],codebuddy_cn_exports=str(cb_exports),**{p+'_home':str(h) for p,h in homes.items()});sv.backup(a)
+ a=argparse.Namespace(vault=str(r/'vault'),host='fixture',include=[str(extra)],provider=None,codebuddy_cn_exports=str(cb_exports),**{p+'_home':str(h) for p,h in homes.items()});sv.backup(a)
  snap=next((r/'vault/snapshots/fixture').iterdir());m=json.loads((snap/'manifest.json').read_text());assert len(m['sessions'])==7
  report=sv.verify_snapshot(r/'vault',snap);assert report['complete'] and report['session_count']==7
  head_path=sv.head_path(r/'vault','fixture');verified_head=head_path.read_bytes();(cb_exports/'corrupt.json').write_text('{"schema":"wrong"}',encoding='utf-8')
